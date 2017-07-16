@@ -10,12 +10,11 @@ decode_results decode_result;
 bool isRecorded = false;
 bool LEARN = true;
 bool RESET = false;
-bool OPERATIONAL = true;
+bool OPERATIONAL = false;
 
 int memPtr;
 
 void setup() {
-
   // put your setup code here, to run once:
   Serial.begin(9600);
 
@@ -38,9 +37,10 @@ void loop() {
     
     // until receiving an IR signal
     if(irrecv.decode(&decode_result)){
-      LEARN = false;
+      //LEARN = false;
       byte index = (memPtr)/6;
       save(decode_result.rawlen, decode_result.value, decode_result.decode_type);
+      transmitResult(&decode_result);
       Serial.println("Saved successfully..");
       Serial1.print("INDEX ");
       Serial1.println(index);
@@ -49,15 +49,18 @@ void loop() {
   }
   
   if(RESET){
-    memPtr = 0;
+    memPtr = 1;
     EEPROM.write(EEPROM.length() - 1, 0);
   }
   while(OPERATIONAL){
     // to simulate BT input
     byte index = 0;
-    decode_results decode_result;
-    getDecoded(0, &decode_result);
-    transmitResult(&decode_result);
+    for(int i = 0; i < memPtr/6; i++){
+      decode_results decode_result;
+      getDecoded(i, &decode_result);
+      transmitResult(&decode_result);
+    }
+    delay(1000);
   }
 }
 
@@ -95,12 +98,12 @@ void save(byte rawLen, int value, byte remote){
 void getDecoded(byte index, decode_results *dr){
   int loc = index*6;
   byte rawlen = EEPROM.read(loc);
-  int data_0 = EEPROM.read(loc+1);
-  int data_1 = EEPROM.read(loc+2);
-  int data_2 = EEPROM.read(loc+3);
-  int data_3 = EEPROM.read(loc+4);
+  unsigned long data_0 = EEPROM.read(loc+1);
+  unsigned long data_1 = EEPROM.read(loc+2);
+  unsigned long data_2 = EEPROM.read(loc+3);
+  unsigned long data_3 = EEPROM.read(loc+4);
   byte type = EEPROM.read(loc+5);
-  int data = data_3 << 24 | data_2 << 16 | data_1 << 8 | data_0;
+  unsigned long data = data_3 << 24 | data_2 << 16 | data_1 << 8 | data_0;
   dr->rawlen = rawlen;
   dr->decode_type = type;
   dr->value = data;
@@ -112,6 +115,8 @@ void updateMemory(){
 
 void transmitResult(decode_results* results){
   int count = results->rawlen;
+  Serial.print("Raw Len = " );
+  Serial.println(count);
   if (results->decode_type == UNKNOWN) {
     Serial.print("Unknown encoding: ");
     //irsend.sendRaw(results->value, count);
@@ -133,22 +138,132 @@ void transmitResult(decode_results* results){
     irsend.sendRC6(results->value, count);
   }
   Serial.print(results->value, HEX);
-  Serial.print(" (");
-  Serial.print(results->bits, DEC);
-  Serial.println(" bits)");
-  Serial.print("Raw (");
-  Serial.print(count, DEC);
-  Serial.print("): ");
+  Serial.println();
+}
+#include <IRremote.h>
 
-  for (int i = 0; i < count; i++) {
-    if ((i % 2) == 1) {
-      Serial.print(results->rawbuf[i]*USECPERTICK, DEC);
-    } 
-    else {
-      Serial.print(-(int)results->rawbuf[i]*USECPERTICK, DEC);
-    }
-    Serial.print(" ");
+#define RECV_PIN 4
+
+IRrecv irrecv(RECV_PIN);
+IRsend irsend;
+decode_results decode_result;
+
+unsigned int *code;
+int rawlen;
+
+bool isRecorded = false;
+bool LEARN = false;
+bool RESET = false;
+bool OPERATIONAL = false;
+
+//===================================================
+
+String encodeLearnt(decode_results* dr){
+  String line = "~C ";
+  if(dr->rawlen < 10){
+    line += "0";
+    line += String(dr->rawlen);
   }
-  Serial.println("");
+  else{
+    line += String(dr->rawlen);
+  }
+  for(int i = 0; i < dr->rawlen; i++){
+    line += " ";
+    String val = String((long)dr->rawbuf[i], DEC);
+    int padLength = 8 - val.length();
+    for(int j = 0; j < padLength; j++){
+      val = "0"+val;
+    }
+    line += val;
+  }
+  line += "#";
+  return line;
+}
+
+//===================================================
+
+void setup() {
+  // put your setup code here, to run once:
+  Serial.begin(9600);
+
+  // BT communication
+  Serial1.begin(9600);
+  
+  irrecv.enableIRIn();
+  Serial.println("Command receive active.");
+}
+
+void loop() {
+  
+  if(Serial1.available() > 0){
+    Serial.println("Serial available..");
+    String all = Serial1.readString();
+    Serial.print("Read str : ");
+    Serial.println(all);
+    if(all.charAt(0) != '~' || all.charAt(all.length() - 1) != '#'){
+      Serial.println("Invalid code!");
+      return;
+    }
+    int g = 0;
+    g++;
+    char c = all.charAt(g++);
+    
+    switch(c){
+      case 'L':
+        LEARN = true;
+        Serial.println("Learning Mode active...");
+        break;
+      case 'O':
+        OPERATIONAL = true;
+        Serial.println("Operarional Mode active...");
+        break;
+       default:
+        Serial.println("Invalid command!");
+    }
+    
+    // drop the space
+    g++;
+    String len = "";
+    for(int i = 0; i < 2; i++){
+      len+=all.charAt(g++);
+    }
+    rawlen = len.toInt();
+    code = (unsigned int *)malloc(rawlen * sizeof(int));
+    
+    for(int i = 0; i < rawlen; i++){
+      // read and drop space
+      g++;
+      String valueStr = "";
+      for(int j = 0; j < 8; j++){
+        valueStr+= all.charAt(g++);
+      }
+      unsigned int value = (unsigned int)valueStr.toInt();
+      code[i] = value;
+    }
+  }
+  
+  if(LEARN){
+    // Serial.println("In learning mode.");
+    byte code;
+    while(!irrecv.decode(&decode_result)){
+      // pass
+      // Serial.print("not recv");
+    }
+    // received an IR signal
+    LEARN = false;
+    String line = encodeLearnt(&decode_result);
+    Serial1 .println(line);
+    Serial.println(line);
+    irrecv.resume();
+  }
+  
+  if(OPERATIONAL){
+    decode_result.rawbuf = code;
+    decode_result.rawlen = rawlen;
+    String received = encodeLearnt(&decode_result);
+    Serial.println(received);
+    irsend.sendRaw(code, rawlen, 38);
+    OPERATIONAL = false;
+  }
 }
 
